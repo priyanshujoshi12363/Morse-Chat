@@ -1,98 +1,203 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  View,
+  FlatList,
+  StyleSheet,
+  KeyboardAvoidingView,
+  Platform,
+  Text,
+  TouchableOpacity,
+  Alert,
+  SafeAreaView,
+  Dimensions,
+  Keyboard,
+} from 'react-native';
+import { useLocalSearchParams, router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import CameraView from '../components/CameraView';
+import ChatBubble from '../components/ChatBubble';
+import ChatInput from '../components/ChatInput';
+import { Message, ChatSession } from '../Types';
+import { updateChatSession } from '../utils/storage';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+const { height } = Dimensions.get('window');
 
-export default function HomeScreen() {
+export default function ChatScreen() {
+  const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams();
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [isScanning, setIsScanning] = useState(true);
+  const flatListRef = useRef<FlatList>(null);
+
+  // Load existing chat if opened from history
+  useEffect(() => {
+    if (params.sessionId && params.messages) {
+      setSessionId(params.sessionId as string);
+      setMessages(JSON.parse(params.messages as string));
+    } else {
+      // New chat session
+      setSessionId(`chat_${Date.now()}`);
+    }
+  }, [params.sessionId]);
+
+  // Scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    }
+  }, [messages]);
+
+  const handleSend = async (text: string) => {
+    const newMessage: Message = {
+      id: `msg_${Date.now()}`,
+      type: 'sent',
+      text: text.toUpperCase(),
+      timestamp: Date.now(),
+    };
+
+    const updatedMessages = [...messages, newMessage];
+    setMessages(updatedMessages);
+
+    // Auto-reply after 1 second
+    setTimeout(async () => {
+      const reply: Message = {
+        id: `msg_${Date.now() + 1}`,
+        type: 'received',
+        text: generateHackerReply(text),
+        timestamp: Date.now(),
+      };
+      
+      const finalMessages = [...updatedMessages, reply];
+      setMessages(finalMessages);
+      
+      // Save to storage
+      await updateChatSession(sessionId, finalMessages);
+    }, 1000);
+  };
+
+  const generateHackerReply = (userMessage: string): string => {
+    const replies = [
+      'ACCESS GRANTED',
+      'SCANNING NETWORK...',
+      'FIREWALL BYPASSED',
+      'ENCRYPTION CRACKED',
+      'SYSTEM BREACH DETECTED',
+      'TRACING IP...',
+      'PROXY ROUTE ESTABLISHED',
+      'DATA PACKET RECEIVED',
+    ];
+    return replies[Math.floor(Math.random() * replies.length)];
+  };
+
+  const handleSignalDetected = () => {
+    const signalMessage: Message = {
+      id: `msg_${Date.now()}`,
+      type: 'received',
+      text: '⚡ SIGNAL DETECTED - ANALYZING...',
+      timestamp: Date.now(),
+    };
+    setMessages(prev => [...prev, signalMessage]);
+  };
+
+  const handleClearChat = () => {
+    Alert.alert(
+      'CLEAR CHAT',
+      'Delete this conversation?',
+      [
+        { text: 'CANCEL', style: 'cancel' },
+        {
+          text: 'DELETE',
+          style: 'destructive',
+          onPress: () => {
+            setMessages([]);
+            setSessionId(`chat_${Date.now()}`);
+          },
+        },
+      ]
+    );
+  };
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
+    <SafeAreaView style={styles.safeArea}>
+      <KeyboardAvoidingView 
+        style={styles.container}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        <CameraView 
+          isScanning={isScanning}
+          onSignalDetected={handleSignalDetected}
         />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+        
+        <View style={[styles.chatContainer, { paddingBottom: 0 }]}>
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => router.push('/history')}>
+              <Text style={styles.headerButton}>📁</Text>
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>SECURE CHAT v2.0</Text>
+            <TouchableOpacity onPress={handleClearChat}>
+              <Text style={styles.headerButton}>🗑️</Text>
+            </TouchableOpacity>
+          </View>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+          <FlatList
+            ref={flatListRef}
+            data={messages}
+            keyExtractor={item => item.id}
+            renderItem={({ item }) => <ChatBubble message={item} />}
+            contentContainerStyle={styles.messagesList}
+            showsVerticalScrollIndicator={false}
+            onContentSizeChange={() => {
+              flatListRef.current?.scrollToEnd({ animated: true });
+            }}
+          />
+
+          <ChatInput onSend={handleSend} />
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  chatContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  header: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#00ff00',
+    backgroundColor: '#0a0a0a',
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  headerButton: {
+    color: '#00ff00',
+    fontSize: 20,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  headerTitle: {
+    color: '#00ff00',
+    fontFamily: 'monospace',
+    fontSize: 14,
+    letterSpacing: 2,
+  },
+  messagesList: {
+    paddingVertical: 16,
+    paddingHorizontal: 8,
+    flexGrow: 1,
   },
 });

@@ -1,50 +1,81 @@
-# Welcome to your Expo app 👋
+🔦 Morse-Chat
+A fun experimental mobile app that sends and receives text messages using light signals from a phone’s flashlight.
+The receiving phone detects blinking patterns through the camera and decodes them into text in real time.
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+The interface is designed like a hacker terminal, with a live scanning camera and chat-style messaging in the same screen.
 
-## Get started
+🚀 Features
 
-1. Install dependencies
+🔦 Flashlight Signal Transmission
+Convert text into blinking light signals.
 
-   ```bash
-   npm install
-   ```
+📷 Live Camera Signal Detection
+The receiver scans incoming light patterns through the camera.
 
-2. Start the app
+🧠 Morse-style Decoding
+Blink durations are decoded into dots and dashes, then converted back into text.
 
-   ```bash
-   npx expo start
-   ```
+💬 Chat-style Interface
+Messages appear in a WhatsApp-like layout:
 
-In the output, you'll find options to open the app in a
+Incoming messages on the left
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+Sent messages on the right
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+🖥 Hacker Terminal UI
+Dark theme with neon-green terminal-style logs.
 
-## Get a fresh project
+💾 Chat History
+Messages are stored locally and displayed in a history panel similar to ChatGPT's mobile interface.
 
-When you're ready, run:
+📡 Offline Communication
+Works without internet — communication happens via light.
 
-```bash
-npm run reset-project
-```
+🧠 How It Works
+Sender
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+User types a message.
 
-## Learn more
+Text is converted into Morse-style signals.
 
-To learn more about developing your project with Expo, look at the following resources:
+Flashlight blinks according to the encoded pattern.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Receiver
 
-## Join the community
+Camera continuously scans for brightness changes.
 
-Join our community of developers creating universal apps.
+Blink durations are measured.
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Patterns are converted into Morse signals.
+
+Morse signals are decoded into readable text.
+
+Message appears in the chat interface.
+
+📱 App Interface
+--------------------------------
+|  LIVE CAMERA SCANNER         |
+|  ● SCANNING FOR SIGNAL       |
+|                              |
+|  [ Camera Preview ]          |
+--------------------------------
+|  CHAT TERMINAL               |
+|                              |
+|  Incoming messages           |
+|  Outgoing messages           |
+|                              |
+|  _                           |
+--------------------------------
+🛠 Tech Stack
+
+Expo (React Native)
+
+TypeScript (.tsx)
+
+Expo Router
+
+Expo Camera
+
+AsyncStorage for local history
+
+EAS Development Client
