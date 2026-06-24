@@ -1,24 +1,30 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   View,
   FlatList,
   StyleSheet,
-  Platform,
   Text,
+  TextInput,
   TouchableOpacity,
   Alert,
   Dimensions,
-  TextInput,
+  KeyboardAvoidingView,
   Keyboard,
+  Platform,
+  AppState,
   Animated,
   Easing,
-  AppState,
 } from 'react-native';
 import { router } from 'expo-router';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
 import {
   Camera,
   useCameraDevice,
@@ -26,581 +32,227 @@ import {
   useFrameProcessor,
 } from 'react-native-vision-camera';
 import { Worklets } from 'react-native-worklets-core';
-import textToMorse from '../../utils/morse';
+import { useResizePlugin } from 'vision-camera-resize-plugin';
+
+import { useMorseTransmitter } from '../../hooks/useMorseTransmitter';
+import { useMorseReceiver } from '../../hooks/useMorseReceiver';
+import {
+  textToMorse,
+  SPEED_PRESETS,
+  SpeedName,
+} from '../../utils/morse';
+import {
+  ChatSession,
+  Message,
+  saveSession,
+  makeMessageId,
+} from '../../utils/chatStorage';
 
 const { height } = Dimensions.get('window');
 
-type Message = {
-  id: string;
-  type: 'sent' | 'received';
-  text: string;
-  timestamp: number;
+const CENTER_REGION = 0.25;
+
+const COLORS = {
+  green: '#00ff00',
+  greenDim: '#006400',
+  greenBright: '#39ff14',
+  amber: '#ffaa00',
+  bg: '#000',
+  panel: '#0a0a0a',
 };
 
-type ChatSession = {
-  id: string;
-  date: string;
-  messages: Message[];
-  preview?: string;
-};
-
-const STORAGE_KEY = '@chat_history';
-
-const MORSE_TO_CHAR: { [key: string]: string } = {
-  '.-': 'A', '-...': 'B', '-.-.': 'C', '-..': 'D', '.': 'E',
-  '..-.': 'F', '--.': 'G', '....': 'H', '..': 'I', '.---': 'J',
-  '-.-': 'K', '.-..': 'L', '--': 'M', '-.': 'N', '---': 'O',
-  '.--.': 'P', '--.-': 'Q', '.-.': 'R', '...': 'S', '-': 'T',
-  '..-': 'U', '...-': 'V', '.--': 'W', '-..-': 'X', '-.--': 'Y',
-  '--..': 'Z', '.----': '1', '..---': '2', '...--': '3', '....-': '4',
-  '.....': '5', '-....': '6', '--...': '7', '---..': '8', '----.': '9',
-  '-----': '0', '/': ' '
-};
-
-const PACKET_CONFIG = {
-  START_MARKER: '###',
-  END_MARKER: '###',
-  MESSAGE_TIMEOUT: 3000,
-  MIN_MESSAGE_LENGTH: 1,
-};
+type Mode = 'send' | 'receive';
 
 export default function ChatScreen() {
-  const insets = useSafeAreaInsets();
+  const [mode, setMode] = useState<Mode>('send');
+  const [speed, setSpeed] = useState<SpeedName>('NORMAL');
   const [messages, setMessages] = useState<Message[]>([]);
-  const [sessionId, setSessionId] = useState<string>(`chat_${Date.now()}`);
-  const [isScanning, setIsScanning] = useState(true);
   const [inputText, setInputText] = useState('');
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [cameraActive, setCameraActive] = useState(true);
-  const [isTorchOn, setIsTorchOn] = useState(false);
-  const [isTransmitting, setIsTransmitting] = useState(false);
-  const [signalDetected, setSignalDetected] = useState(false);
-  const [decodedText, setDecodedText] = useState('');
-  const [packetState, setPacketState] = useState<'idle' | 'receiving' | 'complete'>('idle');
-  
-  const flatListRef = useRef<FlatList>(null);
-  const inputRef = useRef<TextInput>(null);
-  const cameraRef = useRef<Camera>(null);
-  const signalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const messageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  
-  const decodingState = useRef({
-    isSignalOn: false,
-    signalStartTime: 0,
-    currentSymbol: '',
-    currentLetter: '',
-    decodedMessage: '',
-    lastSignalTime: 0,
-    prevBrightness: 0,
-    rawMorseBuffer: '',
-    packetBuffer: '',
-    isReceivingPacket: false,
-    lastCompleteMessage: '',
-  });
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
 
-  const translateY = useRef(new Animated.Value(0)).current;
-  const opacity = useRef(new Animated.Value(1)).current;
-  const torchAnim = useRef(new Animated.Value(0)).current;
-  
+  const unitMs = SPEED_PRESETS[speed];
+  const insets = useSafeAreaInsets();
+
+  const sessionIdRef = useRef(`chat_${Date.now()}`);
+  const flatListRef = useRef<FlatList<Message>>(null);
+
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
 
+  const { torchOn, isTransmitting, progress, transmit, cancel } =
+    useMorseTransmitter(unitMs);
+
+  const handleDecodedMessage = useCallback((text: string) => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(
+      () => {}
+    );
+    const received: Message = {
+      id: makeMessageId('rx'),
+      type: 'received',
+      text,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, received]);
+  }, []);
+
+  const receiver = useMorseReceiver(handleDecodedMessage, { unitMs });
+  const { pushSample, reset: resetReceiver } = receiver;
+
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', (state) => {
-      setCameraActive(state === 'active');
-    });
-    return () => subscription.remove();
+    if (!hasPermission) requestPermission();
+  }, [hasPermission, requestPermission]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (s) =>
+      setCameraActive(s === 'active')
+    );
+    return () => sub.remove();
   }, []);
 
   useEffect(() => {
-    if (!hasPermission) {
-      requestPermission();
-    }
-  }, [hasPermission]);
+    if (mode === 'receive') resetReceiver();
+    else cancel();
+  }, [mode, resetReceiver, cancel]);
 
   useEffect(() => {
-    const keyboardWillShow = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      (event) => {
-        const keyboardHeight = event.endCoordinates.height;
-        setKeyboardHeight(keyboardHeight);
-        
-        Animated.parallel([
-          Animated.timing(translateY, {
-            toValue: -keyboardHeight + (Platform.OS === 'ios' ? insets.bottom : 0),
-            duration: Platform.OS === 'ios' ? 250 : 200,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(opacity, {
-            toValue: 1,
-            duration: 200,
-            useNativeDriver: true,
-          }),
-        ]).start();
-
-        setTimeout(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        }, 100);
-      }
+    const showEvt =
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt =
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvt, () => {
+      setKeyboardVisible(true);
+      setTimeout(
+        () => flatListRef.current?.scrollToEnd({ animated: true }),
+        50
+      );
+    });
+    const hideSub = Keyboard.addListener(hideEvt, () =>
+      setKeyboardVisible(false)
     );
-
-    const keyboardWillHide = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      () => {
-        setKeyboardHeight(0);
-        
-        Animated.parallel([
-          Animated.timing(translateY, {
-            toValue: 0,
-            duration: Platform.OS === 'ios' ? 250 : 200,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(opacity, {
-            toValue: 1,
-            duration: 200,
-            useNativeDriver: true,
-          }),
-        ]).start();
-      }
-    );
-
     return () => {
-      keyboardWillShow.remove();
-      keyboardWillHide.remove();
+      showSub.remove();
+      hideSub.remove();
     };
   }, []);
 
   useEffect(() => {
-    if (messages.length > 0) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
-    }
+    if (messages.length === 0) return;
+    const session: ChatSession = {
+      id: sessionIdRef.current,
+      date: new Date().toISOString().split('T')[0],
+      messages,
+      preview: messages[messages.length - 1]?.text ?? '',
+    };
+    saveSession(session);
+    requestAnimationFrame(() =>
+      flatListRef.current?.scrollToEnd({ animated: true })
+    );
   }, [messages]);
 
-  useEffect(() => {
-    return () => {
-      if (signalTimeoutRef.current) {
-        clearTimeout(signalTimeoutRef.current);
+  const scanning = mode === 'receive' && cameraActive;
+
+  const onBrightness = useCallback(
+    (brightness: number) => pushSample(brightness, Date.now()),
+    [pushSample]
+  );
+  const onBrightnessJS = useMemo(
+    () => Worklets.createRunOnJS(onBrightness),
+    [onBrightness]
+  );
+  const { resize } = useResizePlugin();
+
+  const frameProcessor = useFrameProcessor(
+    (frame) => {
+      'worklet';
+      if (!scanning) return;
+
+      const size = CENTER_REGION;
+      const cropW = Math.floor(frame.width * size);
+      const cropH = Math.floor(frame.height * size);
+      const startX = Math.floor((frame.width - cropW) / 2);
+      const startY = Math.floor((frame.height - cropH) / 2);
+
+      const pixels = resize(frame, {
+        crop: { x: startX, y: startY, width: cropW, height: cropH },
+        scale: { width: 8, height: 8 },
+        pixelFormat: 'rgb',
+        dataType: 'uint8',
+      });
+
+      let total = 0;
+      let count = 0;
+      for (let i = 0; i < pixels.length; i += 3) {
+        total += (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+        count++;
       }
-    };
-  }, []);
+      if (count > 0) onBrightnessJS(total / count);
+    },
+    [scanning, onBrightnessJS, resize]
+  );
 
-  useEffect(() => {
-    if (messageTimeoutRef.current) {
-      clearTimeout(messageTimeoutRef.current);
-    }
-    
-    if (packetState === 'receiving') {
-      messageTimeoutRef.current = setTimeout(() => {
-        const state = decodingState.current;
-        
-        if (state.packetBuffer.length > 0) {
-          handleCompleteMessage(state.packetBuffer);
-        }
-        
-        state.isReceivingPacket = false;
-        state.packetBuffer = '';
-        setPacketState('idle');
-      }, PACKET_CONFIG.MESSAGE_TIMEOUT);
-    }
-    
-    return () => {
-      if (messageTimeoutRef.current) {
-        clearTimeout(messageTimeoutRef.current);
-      }
-    };
-  }, [packetState]);
+  const switchMode = useCallback(
+    (next: Mode) => {
+      if (isTransmitting) return;
+      Haptics.selectionAsync().catch(() => {});
+      setMode(next);
+    },
+    [isTransmitting]
+  );
 
-  const handleSignalIndicator = useCallback(() => {
-    if (signalTimeoutRef.current) {
-      clearTimeout(signalTimeoutRef.current);
-    }
+  const changeSpeed = useCallback(
+    (next: SpeedName) => {
+      if (isTransmitting || next === speed) return;
+      Haptics.selectionAsync().catch(() => {});
+      setSpeed(next);
+      if (mode === 'receive') resetReceiver();
+    },
+    [isTransmitting, speed, mode, resetReceiver]
+  );
 
-    setSignalDetected(true);
+  const handleSend = useCallback(() => {
+    const text = inputText.trim();
+    if (!text || isTransmitting) return;
 
-    signalTimeoutRef.current = setTimeout(() => {
-      setSignalDetected(false);
-    }, 2000);
-  }, []);
-
-  const handleCompleteMessage = useCallback((message: string) => {
-    if (!message || message.length < PACKET_CONFIG.MIN_MESSAGE_LENGTH) return;
-    
-    const cleanMessage = message
-      .replace(new RegExp(PACKET_CONFIG.START_MARKER, 'g'), '')
-      .replace(new RegExp(PACKET_CONFIG.END_MARKER, 'g'), '')
-      .trim();
-    
-    if (!cleanMessage) return;
-    
-    const newMessage: Message = {
-      id: `packet_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'received',
-      text: cleanMessage,
-      timestamp: Date.now(),
-    };
-    
-    setMessages(prev => [...prev, newMessage]);
-    setPacketState('complete');
-    
-    setSignalDetected(true);
-    setTimeout(() => setSignalDetected(false), 2000);
-    
-    const session: ChatSession = {
-      id: sessionId,
-      date: new Date().toISOString().split('T')[0],
-      messages: [...messages, newMessage],
-      preview: cleanMessage,
-    };
-    saveChatSession(session);
-    
-    setTimeout(() => {
-      setPacketState('idle');
-    }, 2000);
-  }, [messages, sessionId]);
-
-  const processMorsePacket = useCallback((decodedChar: string) => {
-    const state = decodingState.current;
-    
-    state.packetBuffer += decodedChar;
-    
-    if (!state.isReceivingPacket && state.packetBuffer.includes(PACKET_CONFIG.START_MARKER)) {
-      state.isReceivingPacket = true;
-      setPacketState('receiving');
-      
-      const startIndex = state.packetBuffer.indexOf(PACKET_CONFIG.START_MARKER);
-      state.packetBuffer = state.packetBuffer.substring(startIndex + PACKET_CONFIG.START_MARKER.length);
-    }
-    
-    if (state.isReceivingPacket && state.packetBuffer.includes(PACKET_CONFIG.END_MARKER)) {
-      const endIndex = state.packetBuffer.indexOf(PACKET_CONFIG.END_MARKER);
-      const completeMessage = state.packetBuffer.substring(0, endIndex);
-      
-      handleCompleteMessage(completeMessage);
-      
-      state.isReceivingPacket = false;
-      state.packetBuffer = '';
-      setPacketState('idle');
-    }
-  }, [handleCompleteMessage]);
-
-  const handleBrightnessChange = useCallback((brightness: number) => {
-    const now = Date.now();
-    const state = decodingState.current;
-    
-    const FLASH_THRESHOLD = 0.8;
-    const MIN_FLASH_DURATION = 50;
-    const SIGNAL_COOLDOWN = 100;
-    const LETTER_GAP = 500;
-    const BRIGHTNESS_CHANGE_THRESHOLD = 0.2;
-    
-    const prevBrightness = state.prevBrightness || 0;
-    const delta = Math.abs(brightness - prevBrightness);
-    state.prevBrightness = brightness;
-    
-    const isRealFlash = brightness > FLASH_THRESHOLD && delta > BRIGHTNESS_CHANGE_THRESHOLD;
-    
-    if (isRealFlash && !state.isSignalOn) {
-      if (now - (state.lastSignalTime || 0) < SIGNAL_COOLDOWN) {
-        return;
-      }
-      
-      state.isSignalOn = true;
-      state.signalStartTime = now;
-      
-      handleSignalIndicator();
-    }
-    else if (!isRealFlash && state.isSignalOn) {
-      state.isSignalOn = false;
-      const duration = now - state.signalStartTime;
-      state.lastSignalTime = now;
-      
-      if (duration > MIN_FLASH_DURATION) {
-        if (duration < 300) {
-          state.currentSymbol += '.';
-        } else {
-          state.currentSymbol += '-';
-        }
-        
-        setDecodedText(`Decoding: ${state.currentSymbol}`);
-      }
-    }
-    
-    if (!state.isSignalOn && state.currentSymbol) {
-      const timeSinceLastSignal = now - (state.lastSignalTime || now);
-      
-      if (timeSinceLastSignal > LETTER_GAP) {
-        const char = MORSE_TO_CHAR[state.currentSymbol] || '?';
-        state.decodedMessage += char;
-        state.currentSymbol = '';
-        
-        setDecodedText(state.decodedMessage);
-        
-        if (char !== '?') {
-          processMorsePacket(char);
-        }
-        
-        if (char === ' ') {
-          const trimmedMessage = state.decodedMessage.trim();
-          if (trimmedMessage && !state.isReceivingPacket) {
-            const decodedMessage: Message = {
-              id: `decoded_${Date.now()}_${Math.random()}`,
-              type: 'received',
-              text: trimmedMessage,
-              timestamp: Date.now(),
-            };
-            setMessages(prev => [...prev, decodedMessage]);
-          }
-          state.decodedMessage = '';
-          setDecodedText('');
-        }
-      }
-    }
-  }, [handleSignalIndicator, processMorsePacket]);
-
-  const handleSignalIndicatorWorklet = Worklets.createRunOnJS(handleSignalIndicator);
-  const handleBrightnessChangeWorklet = Worklets.createRunOnJS(handleBrightnessChange);
-
-  const frameProcessor = useFrameProcessor((frame) => {
-    'worklet';
-
-    if (!isScanning) return;
-    
-    const now = frame.timestamp;
-    const simulatedBrightness = Math.random() < 0.05 ? 0.9 : 0.3 + (Math.random() * 0.2);
-    handleBrightnessChangeWorklet(simulatedBrightness);
-    
-    if (Math.random() < 0.01) {
-      handleSignalIndicatorWorklet();
-    }
-  }, [isScanning]);
-
-  const transmitMorse = async (message: string) => {
-    if (isTransmitting) return;
-    
-    setIsTransmitting(true);
-    
-    const packetMessage = `${PACKET_CONFIG.START_MARKER}${message.toUpperCase()}${PACKET_CONFIG.END_MARKER}`;
-    const morseSequence = textToMorse(packetMessage);
-    
-    const transmitMessage: Message = {
-      id: `transmit_${Date.now()}_${Math.random()}`,
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    const sent: Message = {
+      id: makeMessageId('tx'),
       type: 'sent',
-      text: `📡 TRANSMITTING: ${message}`,
+      text: text.toUpperCase(),
       timestamp: Date.now(),
     };
-    setMessages(prev => [...prev, transmitMessage]);
-
-    const DOT_DURATION = 200;
-    const DASH_DURATION = 600;
-    const SYMBOL_GAP = 200;
-    const LETTER_GAP = 600;
-
-    let delay = 0;
-    const timers: NodeJS.Timeout[] = [];
-
-    for (const morse of morseSequence) {
-      for (const symbol of morse) {
-       
-        const onTimer = setTimeout(() => {
-          setIsTorchOn(true);
-          Animated.sequence([
-            Animated.timing(torchAnim, {
-              toValue: 1,
-              duration: 50,
-              useNativeDriver: false,
-            }),
-          ]).start();
-        }, delay);
-        timers.push(onTimer);
-
-        const symbolDuration = symbol === '.' ? DOT_DURATION : DASH_DURATION;
-        const offTimer = setTimeout(() => {
-          setIsTorchOn(false);
-          Animated.timing(torchAnim, {
-            toValue: 0,
-            duration: 50,
-            useNativeDriver: false,
-          }).start();
-        }, delay + symbolDuration);
-        timers.push(offTimer);
-
-        delay += symbolDuration + SYMBOL_GAP;
-      }
-      delay += LETTER_GAP - SYMBOL_GAP;
-    }
-
-    const completeTimer = setTimeout(() => {
-      setIsTransmitting(false);
-      const completeMessage: Message = {
-        id: `complete_${Date.now()}_${Math.random()}`,
-        type: 'sent',
-        text: '✅ TRANSMISSION COMPLETE',
-        timestamp: Date.now(),
-      };
-      setMessages(prev => [...prev, completeMessage]);
-    }, delay);
-    timers.push(completeTimer);
-
-    return () => timers.forEach(clearTimeout);
-  };
-
-  const handleSend = async () => {
-    if (!inputText.trim()) return;
-
-    const messageText = inputText.trim();
-    
-    const newMessage: Message = {
-      id: `msg_${Date.now()}_${Math.random()}`,
-      type: 'sent',
-      text: messageText.toUpperCase(),
-      timestamp: Date.now(),
-    };
-
-    const updatedMessages = [...messages, newMessage];
-    setMessages(updatedMessages);
+    setMessages((prev) => [...prev, sent]);
     setInputText('');
-    
-    transmitMorse(messageText);
+    transmit(text);
+  }, [inputText, isTransmitting, transmit]);
 
-    setTimeout(async () => {
-      const reply: Message = {
-        id: `reply_${Date.now()}_${Math.random()}`,
-        type: 'received',
-        text: generateHackerReply(messageText),
-        timestamp: Date.now(),
-      };
-      
-      const finalMessages = [...updatedMessages, reply];
-      setMessages(finalMessages);
-      
-      const session: ChatSession = {
-        id: sessionId,
-        date: new Date().toISOString().split('T')[0],
-        messages: finalMessages,
-        preview: finalMessages[finalMessages.length - 1]?.text || '',
-      };
-      
-      await saveChatSession(session);
-    }, 1000);
-  };
-
-  const generateHackerReply = (userMessage: string): string => {
-    const replies = [
-      'ACCESS GRANTED',
-      'SCANNING NETWORK...',
-      'FIREWALL BYPASSED',
-      'ENCRYPTION CRACKED',
-      'SYSTEM BREACH DETECTED',
-      'TRACING IP...',
-      'PROXY ROUTE ESTABLISHED',
-      'DATA PACKET RECEIVED',
-    ];
-    return replies[Math.floor(Math.random() * replies.length)];
-  };
-
-  const handleClearChat = () => {
-    Alert.alert(
-      'CLEAR CHAT',
-      'Delete this conversation?',
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        {
-          text: 'DELETE',
-          style: 'destructive',
-          onPress: () => {
-            setMessages([]);
-            setSessionId(`chat_${Date.now()}`);
-            setDecodedText('');
-            setPacketState('idle');
-            decodingState.current = {
-              isSignalOn: false,
-              signalStartTime: 0,
-              currentSymbol: '',
-              currentLetter: '',
-              decodedMessage: '',
-              lastSignalTime: 0,
-              prevBrightness: 0,
-              rawMorseBuffer: '',
-              packetBuffer: '',
-              isReceivingPacket: false,
-              lastCompleteMessage: '',
-            };
-          },
+  const handleClear = useCallback(() => {
+    Alert.alert('Clear chat', 'Delete this conversation?', [
+      { text: 'CANCEL', style: 'cancel' },
+      {
+        text: 'DELETE',
+        style: 'destructive',
+        onPress: () => {
+          setMessages([]);
+          sessionIdRef.current = `chat_${Date.now()}`;
+          resetReceiver();
         },
-      ]
-    );
-  };
-
-  const saveChatSession = async (session: ChatSession) => {
-    try {
-      const existing = await getChatSessions();
-      const index = existing.findIndex(s => s.id === session.id);
-      
-      if (index !== -1) {
-        existing[index] = session;
-      } else {
-        existing.unshift(session);
-      }
-      
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
-      return true;
-    } catch (error) {
-      console.error('Error saving chat session:', error);
-      return false;
-    }
-  };
-
-  const getChatSessions = async (): Promise<ChatSession[]> => {
-    try {
-      const data = await AsyncStorage.getItem(STORAGE_KEY);
-      return data ? JSON.parse(data) : [];
-    } catch (error) {
-      console.error('Error loading chat sessions:', error);
-      return [];
-    }
-  };
-
-  const renderChatBubble = ({ item }: { item: Message }) => {
-    const isSent = item.type === 'sent';
-    
-    return (
-      <View style={[
-        styles.bubbleContainer,
-        isSent ? styles.sentContainer : styles.receivedContainer
-      ]}>
-        <View style={[
-          styles.bubble,
-          isSent ? styles.sentBubble : styles.receivedBubble
-        ]}>
-          <Text style={styles.messageText}>{item.text}</Text>
-          <Text style={styles.timestamp}>
-            {new Date(item.timestamp).toLocaleTimeString([], { 
-              hour: '2-digit', 
-              minute: '2-digit' 
-            })}
-          </Text>
-        </View>
-      </View>
-    );
-  };
+      },
+    ]);
+  }, [resetReceiver]);
 
   if (!hasPermission) {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <View style={styles.permissionContainer}>
-          <Text style={styles.permissionTitle}>CAMERA ACCESS REQUIRED</Text>
-          <Text style={styles.permissionText}>
-            This app needs camera access for signal detection and Morse code transmission.
+        <View style={styles.gate}>
+          <Text style={styles.gateGlyph}>🔦</Text>
+          <Text style={styles.gateTitle}>CAMERA ACCESS REQUIRED</Text>
+          <Text style={styles.gateText}>
+            Morse-Chat needs the camera to receive light signals and the torch
+            to send them.
           </Text>
-          <TouchableOpacity 
-            style={styles.permissionButton}
-            onPress={requestPermission}
-          >
-            <Text style={styles.permissionButtonText}>GRANT ACCESS</Text>
+          <TouchableOpacity style={styles.gateButton} onPress={requestPermission}>
+            <Text style={styles.gateButtonText}>GRANT ACCESS</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -610,440 +262,703 @@ export default function ChatScreen() {
   if (device == null) {
     return (
       <SafeAreaView style={styles.safeArea}>
-        <View style={styles.permissionContainer}>
-          <Text style={styles.permissionTitle}>NO CAMERA FOUND</Text>
-          <Text style={styles.permissionText}>
-            This device does not have a compatible camera.
+        <View style={styles.gate}>
+          <Text style={styles.gateGlyph}>📷</Text>
+          <Text style={styles.gateTitle}>NO CAMERA FOUND</Text>
+          <Text style={styles.gateText}>
+            This device has no compatible back camera.
           </Text>
         </View>
       </SafeAreaView>
     );
   }
 
+  const sending = mode === 'send';
+  const accent = sending ? COLORS.amber : COLORS.green;
+  const active = sending ? isTransmitting : receiver.signalOn;
+  const bottomInset = keyboardVisible ? 0 : insets.bottom;
+
+  const statusLabel = sending
+    ? isTransmitting
+      ? 'TRANSMITTING'
+      : 'READY TO SEND'
+    : !receiver.isCalibrated
+    ? 'CALIBRATING'
+    : receiver.signalOn
+    ? 'SIGNAL DETECTED'
+    : 'SCANNING';
+
+  const meterFill = receiver.isCalibrated
+    ? Math.max(
+        0,
+        Math.min(1, (receiver.level - receiver.ambient) / 60)
+      )
+    : 0;
+
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
       <StatusBar style="light" />
-      <View style={styles.container}>
-        <View style={styles.cameraContainer}>
-          <Camera
-            ref={cameraRef}
-            style={styles.camera}
-            device={device}
-            isActive={cameraActive}
-            frameProcessor={frameProcessor}
-            frameProcessorFps={5}
-            torch={isTorchOn ? 'on' : 'off'}
-            video={false}
-            audio={false}
-            enableZoomGesture={false}
-          />
-          
-          <View style={styles.cameraOverlay}>
-            <View style={styles.statusContainer}>
-              <View style={[styles.indicator, isScanning && styles.indicatorActive]} />
-              <Text style={styles.statusText}>
-                {signalDetected ? '⚡ SIGNAL DETECTED' : isScanning ? '● SCANNING' : '● IDLE'}
+
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.push('/history')} hitSlop={10}>
+          <Text style={styles.headerIcon}>📁</Text>
+        </TouchableOpacity>
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerTitle}>MORSE·CHAT</Text>
+          <Text style={[styles.headerSub, { color: accent }]}>
+            {statusLabel}
+          </Text>
+        </View>
+        <TouchableOpacity onPress={handleClear} hitSlop={10}>
+          <Text style={styles.headerIcon}>🗑️</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.modeSwitch}>
+        <ModeButton
+          label="SEND"
+          glyph="🔦"
+          active={sending}
+          accent={COLORS.amber}
+          disabled={isTransmitting}
+          onPress={() => switchMode('send')}
+        />
+        <ModeButton
+          label="RECEIVE"
+          glyph="📷"
+          active={!sending}
+          accent={COLORS.green}
+          disabled={isTransmitting}
+          onPress={() => switchMode('receive')}
+        />
+      </View>
+
+      <View style={styles.speedRow}>
+        <Text style={styles.speedLabel}>SPEED</Text>
+        {(['FAST', 'NORMAL', 'SAFE'] as SpeedName[]).map((name) => {
+          const selected = speed === name;
+          return (
+            <TouchableOpacity
+              key={name}
+              style={[styles.speedChip, selected && styles.speedChipActive]}
+              onPress={() => changeSpeed(name)}
+              disabled={isTransmitting}
+              activeOpacity={0.8}
+            >
+              <Text
+                style={[styles.speedChipText, selected && styles.speedChipTextActive]}
+              >
+                {name}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+        <Text style={styles.speedHint}>both phones must match</Text>
+      </View>
+
+      <View style={[styles.cameraContainer, { borderColor: accent }]}>
+        <Camera
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={cameraActive}
+          frameProcessor={frameProcessor}
+          torch={sending && torchOn ? 'on' : 'off'}
+          video={false}
+          audio={false}
+        />
+        <View style={styles.cameraOverlay} pointerEvents="none">
+          <View style={styles.overlayTop}>
+            <View style={[styles.statusPill, { borderColor: accent }]}>
+              <PulsingDot active={active} color={accent} />
+              <Text style={[styles.statusPillText, { color: accent }]}>
+                {statusLabel}
               </Text>
             </View>
-            
-            {decodedText !== '' && (
-              <View style={styles.decodedContainer}>
-                <Text style={styles.decodedText}>📨 {decodedText}</Text>
-              </View>
-            )}
-            
-            {packetState !== 'idle' && (
-              <View style={[
-                styles.packetContainer,
-                packetState === 'receiving' ? styles.packetReceiving : styles.packetComplete
-              ]}>
-                <Text style={styles.packetText}>
-                  {packetState === 'receiving' ? '📥 RECEIVING PACKET...' : '📦 PACKET COMPLETE'}
+            {!sending && receiver.isCalibrated && (
+              <View style={styles.levelBadge}>
+                <Text style={styles.levelBadgeText}>
+                  AMB {receiver.ambient} · LVL {receiver.level}
                 </Text>
               </View>
             )}
-            
-            {isTorchOn && (
-              <Animated.View style={[styles.torchIndicator, { opacity: torchAnim }]}>
-                <Text style={styles.torchText}>🔦 TRANSMITTING</Text>
-              </Animated.View>
+          </View>
+
+          {!sending && (
+            <View
+              style={[
+                styles.crosshair,
+                { borderColor: receiver.signalOn ? COLORS.green : '#1f7a1f' },
+              ]}
+            />
+          )}
+
+          {sending && torchOn && (
+            <View style={styles.torchBadge}>
+              <Text style={styles.torchBadgeText}>🔦 FLASHING</Text>
+            </View>
+          )}
+
+          <View style={styles.overlayBottom}>
+            {!sending && receiver.liveText.length > 0 && (
+              <Text style={styles.liveText} numberOfLines={1}>
+                {receiver.liveText}
+                <Text style={styles.liveCaret}>▋</Text>
+              </Text>
             )}
-            
-            <View style={styles.scanFrame} />
+            <View style={styles.meterTrack}>
+              <View
+                style={[
+                  styles.meterFill,
+                  {
+                    backgroundColor: accent,
+                    width: `${Math.round(
+                      (sending ? progress : meterFill) * 100
+                    )}%`,
+                  },
+                ]}
+              />
+            </View>
           </View>
         </View>
+      </View>
 
-        <View style={styles.chatContainer}>
-          <View style={styles.header}>
-            <TouchableOpacity onPress={() => router.push('/history')}>
-              <Text style={styles.headerButton}>📁</Text>
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>SECURE CHAT v2.0</Text>
-            <TouchableOpacity onPress={handleClearChat}>
-              <Text style={styles.headerButton}>🗑️</Text>
-            </TouchableOpacity>
-          </View>
+      <KeyboardAvoidingView
+        style={styles.chatArea}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={0}
+      >
+        <FlatList
+          ref={flatListRef}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item }) => <ChatBubble message={item} />}
+          contentContainerStyle={[
+            styles.messagesList,
+            !sending && { paddingBottom: 16 + bottomInset },
+          ]}
+          ListEmptyComponent={<EmptyHint sending={sending} />}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          onContentSizeChange={() =>
+            flatListRef.current?.scrollToEnd({ animated: true })
+          }
+        />
 
-          <FlatList
-            ref={flatListRef}
-            data={messages}
-            keyExtractor={item => item.id}
-            renderItem={renderChatBubble}
-            contentContainerStyle={[
-              styles.messagesList,
-              { paddingBottom: keyboardHeight > 0 ? 10 : 16 }
-            ]}
-            showsVerticalScrollIndicator={false}
-            keyboardShouldPersistTaps="handled"
-            onContentSizeChange={() => {
-              flatListRef.current?.scrollToEnd({ animated: true });
-            }}
-          />
-
-          <Animated.View 
-            style={[
-              styles.inputWrapper,
-              {
-                transform: [{ translateY }],
-                opacity,
-                marginBottom: Platform.OS === 'ios' ? 0 : insets.bottom,
-              },
-              keyboardHeight > 0 && styles.inputWrapperActive,
-              isTransmitting && styles.inputWrapperDisabled,
-            ]}
-          >
-            <View style={styles.inputContainer}>
+        {sending && (
+          <View style={[styles.inputBar, { paddingBottom: 8 + bottomInset }]}>
+            <View style={styles.inputWrap}>
               <TextInput
-                ref={inputRef}
                 style={[styles.input, isTransmitting && styles.inputDisabled]}
                 value={inputText}
                 onChangeText={setInputText}
-                placeholder={isTransmitting ? "TRANSMITTING..." : "TYPE MESSAGE..."}
-                placeholderTextColor={isTransmitting ? "#003300" : "#006400"}
+                placeholder={
+                  isTransmitting ? 'TRANSMITTING…' : 'Type a message…'
+                }
+                placeholderTextColor={COLORS.greenDim}
                 multiline
-                maxLength={500}
-                returnKeyType="default"
-                blurOnSubmit={false}
-                selectionColor="#00ff00"
+                maxLength={300}
+                selectionColor={COLORS.green}
                 editable={!isTransmitting}
               />
-              <TouchableOpacity 
-                style={[
-                  styles.sendButton, 
-                  (!inputText.trim() || isTransmitting) && styles.sendButtonDisabled
-                ]}
-                onPress={handleSend}
-                disabled={!inputText.trim() || isTransmitting}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.sendButtonText}>
-                  {isTransmitting ? '⏳' : '>'}
-                </Text>
-              </TouchableOpacity>
+              {inputText.length > 0 && (
+                <Text style={styles.counter}>{inputText.length}/300</Text>
+              )}
             </View>
-          </Animated.View>
-        </View>
-      </View>
+            <TouchableOpacity
+              style={[
+                styles.sendButton,
+                (!inputText.trim() || isTransmitting) &&
+                  styles.sendButtonDisabled,
+              ]}
+              onPress={handleSend}
+              disabled={!inputText.trim() || isTransmitting}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.sendButtonText}>
+                {isTransmitting ? '…' : '➤'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
+function ModeButton({
+  label,
+  glyph,
+  active,
+  accent,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  glyph: string;
+  active: boolean;
+  accent: string;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={[
+        styles.modeButton,
+        active && { borderColor: accent, backgroundColor: '#0d0d0d' },
+        disabled && styles.modeButtonDisabled,
+      ]}
+      onPress={onPress}
+      disabled={disabled}
+      activeOpacity={0.8}
+    >
+      <Text style={[styles.modeText, active && { color: accent }]}>
+        {glyph} {label}
+      </Text>
+      {active && <View style={[styles.modeUnderline, { backgroundColor: accent }]} />}
+    </TouchableOpacity>
+  );
+}
+
+function PulsingDot({ active, color }: { active: boolean; color: string }) {
+  const anim = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!active) {
+      anim.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(anim, {
+          toValue: 0.25,
+          duration: 550,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(anim, {
+          toValue: 1,
+          duration: 550,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [active, anim]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.statusDot,
+        { backgroundColor: active ? color : '#444', opacity: anim },
+      ]}
+    />
+  );
+}
+
+function ChatBubble({ message }: { message: Message }) {
+  const isSent = message.type === 'sent';
+  const morse = useMemo(
+    () => (isSent ? textToMorse(message.text) : ''),
+    [isSent, message.text]
+  );
+  return (
+    <View
+      style={[
+        styles.bubbleRow,
+        isSent ? styles.bubbleRowSent : styles.bubbleRowReceived,
+      ]}
+    >
+      <View
+        style={[styles.bubble, isSent ? styles.bubbleSent : styles.bubbleReceived]}
+      >
+        <Text style={styles.bubbleText}>{message.text}</Text>
+        {!!morse && (
+          <Text style={styles.bubbleMorse} numberOfLines={1}>
+            {morse}
+          </Text>
+        )}
+        <Text style={styles.bubbleTime}>
+          {isSent ? '↑ ' : '↓ '}
+          {new Date(message.timestamp).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function EmptyHint({ sending }: { sending: boolean }) {
+  return (
+    <View style={styles.empty}>
+      <Text style={styles.emptyGlyph}>{sending ? '🔦' : '📡'}</Text>
+      <Text style={styles.emptyText}>
+        {sending
+          ? 'Type a message and tap ➤ to flash it in Morse.'
+          : 'Point at the other phone’s torch to receive.'}
+      </Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  permissionContainer: {
+  safeArea: { flex: 1, backgroundColor: COLORS.bg },
+
+  gate: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: 32,
-    backgroundColor: '#000',
   },
-  permissionTitle: {
-    color: '#00ff00',
+  gateGlyph: { fontSize: 56, marginBottom: 20 },
+  gateTitle: {
+    color: COLORS.green,
     fontFamily: 'monospace',
     fontSize: 20,
     fontWeight: 'bold',
     marginBottom: 16,
     textAlign: 'center',
+    letterSpacing: 1,
   },
-  permissionText: {
-    color: '#006400',
+  gateText: {
+    color: '#009000',
     fontFamily: 'monospace',
     fontSize: 14,
     textAlign: 'center',
-    marginBottom: 32,
+    marginBottom: 28,
+    lineHeight: 20,
   },
-  permissionButton: {
+  gateButton: {
     borderWidth: 2,
-    borderColor: '#00ff00',
+    borderColor: COLORS.green,
     paddingHorizontal: 32,
-    paddingVertical: 16,
-    borderRadius: 8,
-    backgroundColor: '#0a0a0a',
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: COLORS.panel,
   },
-  permissionButtonText: {
-    color: '#00ff00',
+  gateButtonText: {
+    color: COLORS.green,
     fontFamily: 'monospace',
     fontSize: 16,
     fontWeight: 'bold',
+    letterSpacing: 1,
   },
-  cameraContainer: {
-    height: height * 0.3,
-    backgroundColor: '#000',
-    overflow: 'hidden',
-    position: 'relative',
-    zIndex: 1,
-  },
-  camera: {
-    flex: 1,
-  },
-  cameraOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    justifyContent: 'space-between',
-    padding: 16,
-  },
-  statusContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 20,
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#00ff00',
-  },
-  indicator: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: '#666',
-    marginRight: 8,
-  },
-  indicatorActive: {
-    backgroundColor: '#00ff00',
-    shadowColor: '#00ff00',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 4,
-  },
-  statusText: {
-    color: '#00ff00',
-    fontFamily: 'monospace',
-    fontSize: 12,
-  },
-  decodedContainer: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,255,0,0.2)',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#00ff00',
-  },
-  decodedText: {
-    color: '#00ff00',
-    fontFamily: 'monospace',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  packetContainer: {
-    alignSelf: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    marginTop: 8,
-  },
-  packetReceiving: {
-    backgroundColor: 'rgba(255,165,0,0.2)',
-    borderColor: '#ffaa00',
-  },
-  packetComplete: {
-    backgroundColor: 'rgba(0,255,0,0.2)',
-    borderColor: '#00ff00',
-  },
-  packetText: {
-    color: '#00ff00',
-    fontFamily: 'monospace',
-    fontSize: 12,
-    textAlign: 'center',
-  },
-  torchIndicator: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(255,165,0,0.3)',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#ffaa00',
-  },
-  torchText: {
-    color: '#ffaa00',
-    fontFamily: 'monospace',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  scanFrame: {
-    width: 200,
-    height: 200,
-    borderWidth: 2,
-    borderColor: '#00ff00',
-    alignSelf: 'center',
-    marginBottom: 40,
-    opacity: 0.5,
-  },
-  chatContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-    position: 'relative',
-  },
+
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
     borderBottomWidth: 1,
-    borderBottomColor: '#00ff00',
-    backgroundColor: '#0a0a0a',
-    zIndex: 2,
+    borderBottomColor: '#0f2f0f',
+    backgroundColor: COLORS.panel,
   },
-  headerButton: {
-    color: '#00ff00',
-    fontSize: 20,
-  },
+  headerIcon: { fontSize: 20 },
+  headerCenter: { alignItems: 'center' },
   headerTitle: {
-    color: '#00ff00',
+    color: COLORS.green,
     fontFamily: 'monospace',
-    fontSize: 14,
+    fontSize: 17,
+    letterSpacing: 4,
+    fontWeight: 'bold',
+  },
+  headerSub: {
+    fontFamily: 'monospace',
+    fontSize: 9,
     letterSpacing: 2,
+    marginTop: 2,
   },
-  messagesList: {
-    paddingVertical: 16,
-    paddingHorizontal: 8,
-    flexGrow: 1,
-  },
-  bubbleContainer: {
-    paddingHorizontal: 12,
-    marginVertical: 4,
+
+  modeSwitch: {
     flexDirection: 'row',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 10,
+    backgroundColor: COLORS.bg,
   },
-  sentContainer: {
-    justifyContent: 'flex-end',
-  },
-  receivedContainer: {
-    justifyContent: 'flex-start',
-  },
-  bubble: {
-    maxWidth: '80%',
-    padding: 12,
-    borderRadius: 16,
-    backgroundColor: '#000',
+  modeButton: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 10,
     borderWidth: 1,
+    borderColor: '#143314',
+    alignItems: 'center',
+    backgroundColor: COLORS.panel,
+    overflow: 'hidden',
   },
-  sentBubble: {
-    borderColor: '#39ff14',
-    backgroundColor: '#0a0a0a',
-  },
-  receivedBubble: {
-    borderColor: '#006400',
-    backgroundColor: '#0a330a',
-  },
-  messageText: {
-    color: '#00ff00',
+  modeButtonDisabled: { opacity: 0.4 },
+  modeText: {
+    color: '#3a7a3a',
     fontFamily: 'monospace',
     fontSize: 14,
-    marginBottom: 4,
+    fontWeight: 'bold',
+    letterSpacing: 1.5,
   },
-  timestamp: {
-    color: '#006400',
+  modeUnderline: {
+    position: 'absolute',
+    bottom: 0,
+    left: '25%',
+    right: '25%',
+    height: 2,
+    borderRadius: 2,
+  },
+
+  speedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+    gap: 6,
+  },
+  speedLabel: {
+    color: COLORS.greenDim,
     fontFamily: 'monospace',
     fontSize: 10,
-    alignSelf: 'flex-end',
+    letterSpacing: 1,
+    marginRight: 2,
   },
-  inputWrapper: {
-    backgroundColor: '#000',
-    borderTopWidth: 1,
-    borderTopColor: '#00ff00',
-    zIndex: 1000,
-    elevation: 1000,
-    shadowColor: '#00ff00',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+  speedChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#143314',
+    backgroundColor: COLORS.panel,
   },
-  inputWrapperActive: {
-    borderTopWidth: 2,
-    borderTopColor: '#39ff14',
-    shadowOpacity: 0.3,
+  speedChipActive: {
+    borderColor: COLORS.green,
+    backgroundColor: '#0d1f0d',
   },
-  inputWrapperDisabled: {
-    borderTopColor: '#ffaa00',
+  speedChipText: {
+    color: '#3a7a3a',
+    fontFamily: 'monospace',
+    fontSize: 11,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+  speedChipTextActive: { color: COLORS.green },
+  speedHint: {
+    color: '#2f6f2f',
+    fontFamily: 'monospace',
+    fontSize: 8,
+    flex: 1,
+    textAlign: 'right',
+  },
+
+  cameraContainer: {
+    height: height * 0.26,
+    marginHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    backgroundColor: COLORS.bg,
+    overflow: 'hidden',
+  },
+  cameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    padding: 12,
+    justifyContent: 'space-between',
+  },
+  overlayTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    borderWidth: 1,
+  },
+  statusDot: { width: 8, height: 8, borderRadius: 4, marginRight: 7 },
+  statusPillText: {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    letterSpacing: 1,
+    fontWeight: 'bold',
+  },
+  levelBadge: {
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+  },
+  levelBadgeText: {
+    color: COLORS.green,
+    fontFamily: 'monospace',
+    fontSize: 10,
+  },
+  crosshair: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    width: 54,
+    height: 54,
+    marginLeft: -27,
+    marginTop: -27,
+    borderWidth: 2,
+    borderRadius: 27,
     opacity: 0.8,
   },
-  inputContainer: {
-    flexDirection: 'row',
-    padding: 8,
+  torchBadge: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.amber,
+  },
+  torchBadgeText: {
+    color: COLORS.amber,
+    fontFamily: 'monospace',
+    fontSize: 13,
+    fontWeight: 'bold',
+    letterSpacing: 1,
+  },
+  overlayBottom: { gap: 8 },
+  liveText: {
+    color: COLORS.greenBright,
+    fontFamily: 'monospace',
+    fontSize: 17,
+    fontWeight: 'bold',
+    letterSpacing: 2,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  liveCaret: { color: COLORS.green, opacity: 0.7 },
+  meterTrack: {
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    overflow: 'hidden',
+  },
+  meterFill: { height: '100%', borderRadius: 2 },
+
+  chatArea: { flex: 1, backgroundColor: COLORS.bg },
+  messagesList: { padding: 12, paddingBottom: 16, flexGrow: 1 },
+
+  empty: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 32,
+    paddingTop: 40,
+  },
+  emptyGlyph: { fontSize: 44, marginBottom: 16, opacity: 0.8 },
+  emptyText: {
+    color: COLORS.greenDim,
+    fontFamily: 'monospace',
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
+  bubbleRow: { flexDirection: 'row', marginVertical: 4 },
+  bubbleRowSent: { justifyContent: 'flex-end' },
+  bubbleRowReceived: { justifyContent: 'flex-start' },
+  bubble: {
+    maxWidth: '82%',
     paddingHorizontal: 12,
-    backgroundColor: '#000',
+    paddingVertical: 9,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  bubbleSent: {
+    borderColor: COLORS.greenBright,
+    backgroundColor: '#0c160c',
+    borderBottomRightRadius: 4,
+  },
+  bubbleReceived: {
+    borderColor: COLORS.greenDim,
+    backgroundColor: '#0a330a',
+    borderBottomLeftRadius: 4,
+  },
+  bubbleText: {
+    color: COLORS.green,
+    fontFamily: 'monospace',
+    fontSize: 15,
+    letterSpacing: 0.5,
+  },
+  bubbleMorse: {
+    color: '#2f8f2f',
+    fontFamily: 'monospace',
+    fontSize: 11,
+    marginTop: 4,
+    letterSpacing: 1,
+  },
+  bubbleTime: {
+    color: COLORS.greenDim,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    alignSelf: 'flex-end',
+    marginTop: 5,
+  },
+
+  inputBar: {
+    flexDirection: 'row',
     alignItems: 'flex-end',
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: Platform.OS === 'ios' ? 8 : 10,
+    borderTopWidth: 1,
+    borderTopColor: '#0f2f0f',
+    backgroundColor: COLORS.panel,
+  },
+  inputWrap: {
+    flex: 1,
+    backgroundColor: COLORS.bg,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: '#1f7a1f',
+    paddingRight: 12,
+    justifyContent: 'center',
   },
   input: {
-    flex: 1,
-    backgroundColor: '#0a0a0a',
-    color: '#00ff00',
+    color: COLORS.green,
     fontFamily: 'monospace',
-    fontSize: 14,
+    fontSize: 15,
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: '#00ff00',
-    maxHeight: 100,
-    minHeight: 40,
+    paddingTop: Platform.OS === 'ios' ? 12 : 8,
+    paddingBottom: Platform.OS === 'ios' ? 12 : 8,
+    maxHeight: 110,
+    minHeight: 44,
   },
-  inputDisabled: {
-    borderColor: '#ffaa00',
-    color: '#666',
+  inputDisabled: { color: '#666' },
+  counter: {
+    color: COLORS.greenDim,
+    fontFamily: 'monospace',
+    fontSize: 9,
+    alignSelf: 'flex-end',
+    paddingBottom: 6,
   },
   sendButton: {
     marginLeft: 8,
-    marginBottom: 2,
-    backgroundColor: '#00ff00',
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: COLORS.green,
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#39ff14',
-    shadowColor: '#00ff00',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 3,
+    shadowColor: COLORS.green,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
+    elevation: 4,
   },
   sendButtonDisabled: {
-    backgroundColor: '#0a330a',
-    borderColor: '#006400',
-    shadowOpacity: 0.1,
+    backgroundColor: '#143314',
+    shadowOpacity: 0,
+    elevation: 0,
   },
-  sendButtonText: {
-    color: '#000',
-    fontFamily: 'monospace',
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
+  sendButtonText: { color: '#000', fontSize: 19, fontWeight: 'bold' },
 });
